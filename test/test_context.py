@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-check for askpass-context. No framework: run it, read the asserts."""
+"""Self-check for askpass. No framework: run it, read the asserts."""
 
 import importlib.machinery
 import importlib.util
@@ -10,7 +10,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # The helper has no .py suffix, so the loader has to be named explicitly.
-_loader = importlib.machinery.SourceFileLoader("askpass_context", str(ROOT / "askpass-context"))
+_loader = importlib.machinery.SourceFileLoader("askpass_context", str(ROOT / "askpass"))
 _spec = importlib.util.spec_from_loader(_loader.name, _loader)
 ac = importlib.util.module_from_spec(_spec)
 _loader.exec_module(ac)
@@ -95,6 +95,16 @@ def test_context_env_wins():
         assert ac.context().get("server") is None
     finally:
         os.environ.pop("ASKPASS_CONTEXT", None)
+
+
+def test_caller_in_the_first_line():
+    named = {"kind": "local", "caller": "ansible-playbook", "run_as": "root", "command": "id"}
+    assert "ansible-playbook is asking to run a command as root." in ac.body(named, "")
+    anonymous = {"kind": "local", "run_as": "root", "command": "id"}
+    assert "A command is about to run as root." in ac.body(anonymous, "")
+    remote = {"kind": "ssh", "caller": "claude", "run_as": "root", "command": "id"}
+    assert "claude is asking to run a remote command as root." in ac.body(remote, "")
+    assert "Claude Code" not in ac.body(named, "")
 
 
 def test_titles_and_rows():

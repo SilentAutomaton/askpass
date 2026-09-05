@@ -1,4 +1,4 @@
-# Working on askpass-context
+# Working on askpass
 
 Tier: 1
 
@@ -13,7 +13,7 @@ the person typing the password knows what they are approving.
 ## Running it
 
 ```
-export SUDO_ASKPASS=/path/to/askpass-context
+export SUDO_ASKPASS=/path/to/askpass
 sudo -A pacman -Syu
 ```
 
@@ -23,7 +23,7 @@ The MCP server is registered as a stdio server running `mcp/index.js`.
 
 ```
 python3 test/test_context.py          # parsing, escaping, danger patterns
-python3 askpass-context --demo        # both dialogs, with sample data
+python3 askpass --demo                # both dialogs, with sample data
 node mcp/index.js --check             # askpass path and the servers it can see
 ```
 

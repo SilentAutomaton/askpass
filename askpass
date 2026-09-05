@@ -25,9 +25,17 @@ import sys
 TIMEOUT_S = int(os.environ.get("ASKPASS_TIMEOUT", "300"))
 COMMAND_LIMIT = 300
 PROC_WALK_LIMIT = 5
-LOG_TAG = "claude-sudo"
+LOG_TAG = "askpass"
 
 EXIT_OK, EXIT_DECLINED, EXIT_NO_PROMPTER, EXIT_TIMEOUT = 0, 1, 2, 5
+
+# "zsh is asking" is true but useless: sudo is nearly always called from a
+# shell, often through a wrapper. Keep walking up until something that is
+# neither shows up — the agent, the playbook, or the terminal a person typed in.
+SHELLS = {
+    "sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "busybox",
+    "timeout", "env", "nice", "nohup", "setsid", "stdbuf", "xargs", "script",
+}
 
 # sudo options that consume the next argument
 SUDO_VALUE_OPTS = {
@@ -148,6 +156,23 @@ def _cwd_of(pid: int) -> str:
     return ""
 
 
+def caller_of(pid: int) -> str:
+    """Name the program behind the sudo call, looking past the shells."""
+    candidate = _parent_of(pid)
+    fallback = ""
+    for _ in range(PROC_WALK_LIMIT):
+        if candidate <= 1:
+            break
+        name = _proc_field(candidate, "comm").strip()
+        if not name:
+            break
+        if name not in SHELLS:
+            return name
+        fallback = fallback or name
+        candidate = _parent_of(candidate)
+    return fallback
+
+
 def local_context() -> dict:
     """Find the sudo that spawned this helper and describe what it is about to do."""
     pid = os.getppid()
@@ -160,7 +185,7 @@ def local_context() -> dict:
                 break
             run_as, command = parse_sudo_argv(argv)
             return {"kind": "local", "run_as": run_as, "command": command,
-                    "cwd": _cwd_of(pid)}
+                    "cwd": _cwd_of(pid), "caller": caller_of(pid)}
         pid = _parent_of(pid)
     return {}
 
@@ -242,10 +267,12 @@ def body(ctx: dict, prompt: str) -> str:
         lines.append("⚠ This command is destructive.")
         lines.append("")
     run_as = ctx.get("run_as") or "root"
-    if ctx.get("kind") == "ssh":
-        lines.append(f"Claude Code is asking to run a remote command as {run_as}.")
+    caller = ctx.get("caller")
+    where = "a remote command" if ctx.get("kind") == "ssh" else "a command"
+    if ctx and caller:
+        lines.append(f"{caller} is asking to run {where} as {run_as}.")
     elif ctx:
-        lines.append(f"Claude Code is asking to run a command as {run_as}.")
+        lines.append(f"{where.capitalize()} is about to run as {run_as}.")
     else:
         lines.append(prompt or "A program is asking for a sudo password.")
     lines.append("")
@@ -313,7 +340,7 @@ def ask_tty(ctx: dict, prompt: str) -> tuple[str | None, int]:
 
 def log(ctx: dict, outcome: str) -> None:
     parts = [f"outcome={outcome}", f"kind={ctx.get('kind', 'unknown')}"]
-    for key in ("server", "host", "login", "run_as", "cwd"):
+    for key in ("caller", "server", "host", "login", "run_as", "cwd"):
         if ctx.get(key):
             parts.append(f"{key}={ctx[key]}")
     if ctx.get("command"):
@@ -335,10 +362,11 @@ def graphical() -> bool:
 
 def demo() -> int:
     samples = [
-        {"kind": "local", "run_as": "root", "command": "pacman -Syu",
-         "cwd": "/home/silent/proj/code/mystical"},
-        {"kind": "ssh", "server": "glinet", "description": "GL.iNet router in the hallway",
-         "host": "192.168.8.1", "login": "root", "port": 22, "run_as": "root",
+        {"kind": "local", "caller": "ansible-playbook", "run_as": "root",
+         "command": "pacman -Syu", "cwd": "/srv/deploy"},
+        {"kind": "ssh", "caller": "claude", "server": "edge-router",
+         "description": "OpenWrt box at the office door", "host": "203.0.113.7",
+         "login": "deploy", "port": 22, "run_as": "root",
          "command": "sudo -S -- rm -rf /overlay/upper/etc"},
     ]
     for ctx in samples:

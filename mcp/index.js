@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Run one command under sudo on a remote host. The password is asked for
-// locally through askpass-context, which is told what it is being asked for,
+// locally through the askpass helper, which is told what it is being asked for,
 // and reaches the remote sudo through stdin only.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -13,7 +13,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const ASKPASS = process.env.SUDO_ASKPASS ?? join(HERE, '..', 'askpass-context');
+const ASKPASS = process.env.SUDO_ASKPASS ?? join(HERE, '..', 'askpass');
 const SSH_MANAGER_ENV = process.env.SSH_MANAGER_ENV ?? `${homedir()}/.ssh-manager/.env`;
 const CONNECT_TIMEOUT = 10;
 
@@ -70,6 +70,16 @@ function askpass(prompt, context) {
   });
 }
 
+// The MCP client is this process's parent; naming it in the dialog beats
+// claiming the request came from "the MCP server".
+function callerName() {
+  try {
+    return readFileSync(`/proc/${process.ppid}/comm`, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
 // Ask the network before asking the person: a dead host should not cost a
 // password prompt.
 function reachable(host, port) {
@@ -99,6 +109,7 @@ function sshSudo({ server, description, host, user, port = 22, keyPath, command,
 
   const context = {
     kind: 'ssh',
+    caller: callerName(),
     server, description, host, port,
     login: user,
     run_as: sudoUser || 'root',
@@ -126,7 +137,7 @@ function sshSudo({ server, description, host, user, port = 22, keyPath, command,
     .then(run);
 }
 
-const server = new McpServer({ name: 'sudo-ssh', version: '2.0.0' });
+const server = new McpServer({ name: 'sudo-ssh', version: '1.0.0' });
 
 server.tool(
   'ssh_sudo_exec',

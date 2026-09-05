@@ -1,81 +1,171 @@
-# askpass-context
+# askpass
 
 A sudo password dialog that tells you what you are approving.
 
-`sudo -A` hands its askpass helper one thing: a prompt string. So the dialog you
-get says "Password:" and nothing else — not the command, not the target user,
-not the machine. If an agent or a script is driving sudo on your behalf, you are
+**Linux only.** It reads `/proc`, talks to zenity or `systemd-ask-password`, and
+logs to the journal. None of that exists elsewhere.
+
+![A local sudo prompt naming the caller, the directory and the command](docs/local.png)
+
+![A remote sudo prompt with a destructive-command banner](docs/ssh-destructive.png)
+
+## The problem
+
+`SUDO_ASKPASS` is a standard sudo feature: point it at a program, run `sudo -A`,
+and sudo asks that program for the password instead of using the terminal. It
+has one flaw. sudo hands the helper a single string — the prompt — and nothing
+else. Not the command, not the target user, not the directory. So every askpass
+dialog ever written says "Password:" and leaves you to guess.
+
+If a script, a CI wrapper, or an agent is driving sudo on your behalf, you are
 typing your password blind.
 
 This helper works the rest out on its own.
 
-```
-┌ sudo — glinet (ssh) ─────────────────────────────────┐
-│ ⚠ This command is destructive.                       │
-│                                                      │
-│ Claude Code is asking to run a remote command as root│
-│                                                      │
-│   Where     glinet · GL.iNet router in the hallway   │
-│   Host      root@192.168.8.1                         │
-│   Run as    root                                     │
-│   Command   sudo -S -- rm -rf /overlay/upper/etc     │
-│                                                      │
-│ Password  [___________________]                      │
-│                        [ Cancel ] [ Run anyway ]     │
-└──────────────────────────────────────────────────────┘
-```
-
 ## How it knows
 
 * **Locally** it walks up `/proc` from its own process until it finds the `sudo`
-  that spawned it, then reads that process's command line, target user and
-  working directory. No cooperation from the caller is needed.
-* **Over ssh** the bundled MCP server passes a JSON context in the
-  `ASKPASS_CONTEXT` environment variable, so the dialog can name the server, its
-  description, the login and the exact remote command.
-* If neither works it shows the original prompt, exactly like before.
+  that spawned it, then reads that process's command line and target user. The
+  working directory comes from sudo's parent, because sudo is setuid root and
+  its own `cwd` link is unreadable. Nothing is required from the caller.
+* **Who is asking** is the first ancestor that is not a shell or a wrapper, so
+  the dialog says `ansible-playbook is asking…` rather than the useless
+  `zsh is asking…`.
+* **Over ssh** the bundled MCP server passes a JSON context in `ASKPASS_CONTEXT`,
+  which lets the dialog name the server, its description, the login and the
+  exact remote command.
+* If neither works, it shows the original prompt, exactly like any other helper.
+
+## Requirements
+
+| | |
+|---|---|
+| OS | Linux — `/proc` and the systemd journal |
+| Python | 3.10 or newer, standard library only |
+| Dialog | `zenity` for the graphical prompt |
+| Fallbacks | `systemd-ask-password`, then a tty read |
+| Logging | `systemd-cat`, optional — its absence is not an error |
+
+Developed on Arch with Hyprland (Wayland); GTK picks X11 or Wayland by itself
+and the dialog works the same either way.
 
 ## Install
 
-Python 3 and `zenity` for the graphical dialog; `systemd-ask-password` or a tty
-are used as fallbacks. No third-party packages.
-
+```sh
+git clone https://github.com/SilentAutomaton/askpass ~/askpass
+chmod +x ~/askpass/askpass
+echo 'export SUDO_ASKPASS=$HOME/askpass/askpass' >> ~/.profile
 ```
-git clone <this repo> ~/askpass-context
-export SUDO_ASKPASS=~/askpass-context/askpass-context   # in ~/.profile or ~/.zshenv
+
+Then, in a new shell:
+
+```sh
 sudo -A id
 ```
 
-To register the MCP server:
+You should get a dialog naming the program that called sudo, the directory and
+`id`.
+
+`askpass --demo` renders both dialogs with sample data, which is a quicker way
+to see what they look like.
+
+## Running sudo on a remote host
+
+The [`mcp/`](mcp/) directory holds an MCP server with one tool,
+`ssh_sudo_exec`: it runs a single command under sudo on a remote host, asks for
+the password locally through this helper, and feeds it to the remote `sudo -S`
+over stdin. The password is never an argument and never an environment variable.
+
+```sh
+cd mcp && npm install
+```
 
 ```json
-"sudo-ssh": {
-  "type": "stdio",
-  "command": "node",
-  "args": ["/path/to/askpass-context/mcp/index.js"],
-  "env": { "SUDO_ASKPASS": "/path/to/askpass-context/askpass-context" }
+{
+  "mcpServers": {
+    "sudo-ssh": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/path/to/askpass/mcp/index.js"],
+      "env": {
+        "SUDO_ASKPASS": "/path/to/askpass/askpass",
+        "SSH_MANAGER_ENV": "/path/to/servers.env"
+      }
+    }
+  }
 }
 ```
 
-`cd mcp && npm install` first. Server definitions are read from an
-ssh-manager style `~/.ssh-manager/.env` (`SSH_SERVER_<NAME>_HOST`, `_USER`,
-`_PORT`, `_KEYPATH`, `_DESCRIPTION`).
+Servers are read from an env file whose format matches
+[mcp-ssh-manager](https://www.npmjs.com/package/mcp-ssh-manager), so an existing
+one can be reused as is. `SSH_MANAGER_ENV` may point anywhere; the default is
+`~/.ssh-manager/.env`.
 
-## Behaviour worth knowing
+| Key | Meaning |
+|---|---|
+| `SSH_SERVER_<NAME>_HOST` | hostname or address |
+| `SSH_SERVER_<NAME>_USER` | ssh login |
+| `SSH_SERVER_<NAME>_PORT` | port, defaults to 22 |
+| `SSH_SERVER_<NAME>_KEYPATH` | private key, optional |
+| `SSH_SERVER_<NAME>_DESCRIPTION` | shown in the dialog, optional but worth filling in |
 
-* The dialog times out after 300 seconds, so a forgotten prompt cannot wedge the
-  caller. Cancel, timeout and "nowhere to ask" are distinct exit codes (1, 5, 2)
-  rather than one generic failure. `ASKPASS_TIMEOUT` overrides the 300.
-* The remote side checks that the host answers on its ssh port before the dialog
-  opens, so a machine that is down or a typo in the name costs you an error
-  after ten seconds instead of a password prompt.
-* Every request is logged to the journal under the `claude-sudo` tag: what was
-  asked, where, and whether you allowed it. The password is never part of that.
-* Commands that are hard to undo get a banner and an OK button labelled `Run
-  anyway`. The list is deliberately short — it is a hint for the eye, not a
-  policy engine.
-* The password goes to stdout for sudo and, for the remote case, into the stdin
-  of `sudo -S`. It is never an argument and never an environment variable.
+`node mcp/index.js --check` prints the helper it will use and the servers it can
+see. The host is checked for a listening ssh port before the dialog opens, so a
+machine that is down costs you an error after ten seconds instead of a password
+prompt.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | password on stdout |
+| 1 | the person cancelled |
+| 5 | the dialog timed out — 300 s, `ASKPASS_TIMEOUT` overrides |
+| 2 | no display, no `systemd-ask-password`, no tty — nowhere to ask |
+
+Callers can tell these apart, which beats the usual "askpass failed".
+
+## What gets logged
+
+One line per request, under the `askpass` tag:
+
+```console
+$ journalctl -t askpass -n 2 -o cat
+outcome=ok kind=local caller=claude run_as=root cwd=/srv/deploy command=pacman -Syu
+outcome=declined kind=ssh caller=claude server=edge-router login=deploy run_as=root command=sudo -S -- systemctl restart nginx
+```
+
+The password is not part of the context those lines are built from, so it cannot
+end up there.
+
+## What this is not
+
+This is a transparency tool, not an access control tool.
+
+It makes the dialog honest in a setup where some program already runs sudo. It
+does **not** make such a setup safe, and it is not a sandbox, a policy engine, or
+an audit trail you could lean on. If you let automation run commands as root,
+you own that decision; this only gives you a fair chance of seeing what is about
+to happen before you type your password.
+
+The destructive-command banner is a hint for the eye. The pattern list is short
+and deliberately readable, and plenty slips past it — `bash -c '…'`, a script
+with an innocent name, a command long enough that nobody reads to the end. Treat
+a missing banner as "no opinion", never as "safe".
+
+Escaping is handled where it matters: the dialog text is Pango markup, and
+anything taken from a command line is escaped before it gets there.
+
+## Development
+
+```sh
+python3 test/test_context.py   # parsing, escaping, danger patterns, caller
+python3 askpass --demo         # both dialogs, sample data
+node mcp/index.js --check      # helper path and visible servers
+```
+
+The screenshots above are rendered inside a disposable Xvfb desktop, so they
+contain no real hosts.
 
 ## Licence
 
