@@ -53,6 +53,39 @@ as root. Against those three, a dialog you have to read is a real improvement.
 It is, of course, still a dialog you have to read — see
 [What this is not](#what-this-is-not).
 
+## Why not just put the password in a config file?
+
+Storing it is the obvious approach, and most tools that automate `sudo` over ssh
+offer it — a `password` or `sudo_password` field in a config file or an `.env`,
+loaded at start and piped to `sudo -S` when needed. It works, and the good
+implementations are careful about the transport: the secret goes through stdin,
+not through a command line where the remote process list would expose it.
+
+The transport is not the problem. Storage is.
+
+* **A stored secret has a lifetime you no longer control.** It sits in a file
+  from the moment you write it. Backups pick it up, dotfile sync carries it to
+  another machine, a stray `git add -A` commits it, a pasted config dump shares
+  it. The exposure is not one moment, it is every moment after.
+* **Anything that can read files can read it.** That includes the very automation
+  you are trying to constrain. An agent with a stored password does not need to
+  ask you for anything, ever — and if it can be talked into reading a file and
+  printing it, the secret leaves with the output.
+* **It removes the human from every future call.** That is the point of storing
+  it, and it is also the whole cost: the first approval becomes the last one.
+
+With an askpass helper, there is nothing at rest to leak. The password exists
+between the dialog and sudo's stdin, for the length of one command, and then it
+is gone. Each escalation is a separate decision, made by a person who can see
+what is being escalated.
+
+The honest trade-off: **this needs you to be there.** Unattended jobs, cron, CI
+on a headless box — none of that can use a dialog. If your automation must run
+while you sleep, a stored credential or a scoped `NOPASSWD` rule is the right
+answer, and the way to make it safe is to narrow what that credential may do,
+not to pretend it is not stored. This helper is for the other case: work you are
+present for, done by something you would rather watch than trust.
+
 ## How it knows
 
 * **Locally** it walks up `/proc` from its own process until it finds the `sudo`
@@ -128,9 +161,17 @@ cd mcp && npm install
 ```
 
 Servers are read from an env file whose format matches
-[mcp-ssh-manager](https://www.npmjs.com/package/mcp-ssh-manager), so an existing
-one can be reused as is. `SSH_MANAGER_ENV` may point anywhere; the default is
+[bvisible/mcp-ssh-manager](https://github.com/bvisible/mcp-ssh-manager)
+([npm](https://www.npmjs.com/package/mcp-ssh-manager)), so an existing one can
+be reused as is. `SSH_MANAGER_ENV` may point anywhere; the default is
 `~/.ssh-manager/.env`.
+
+That project is the fuller tool — sessions, tunnels, deployments, database
+work — and it is worth using for all of that. This server deliberately does one
+thing it does differently: it never reads a stored `SSH_SERVER_*_SUDO_PASSWORD`,
+and asks a person instead. See [above](#why-not-just-put-the-password-in-a-config-file)
+for why. The two can share the same file; only the password fields are ignored
+here.
 
 | Key | Meaning |
 |---|---|

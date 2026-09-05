@@ -9,6 +9,13 @@ an argument and never an environment variable.
 See the [main README](../README.md) for the dialog, the config snippet and the
 `.env` format.
 
+Server definitions use the format of
+[bvisible/mcp-ssh-manager](https://github.com/bvisible/mcp-ssh-manager), so an
+existing file works unchanged. The one field this server ignores on purpose is
+`SSH_SERVER_*_SUDO_PASSWORD`: a stored password means every later escalation
+happens without anyone being asked, and it means there is a secret on disk to
+leak. Here the password is requested per command and kept nowhere.
+
 ## Read this before you wire it up
 
 This gives whatever drives the MCP client a path to **root on every machine in
