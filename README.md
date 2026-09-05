@@ -2,6 +2,10 @@
 
 A sudo password dialog that tells you what you are approving.
 
+It exists so that a program — an agent, a deploy script, a job runner — can use
+`sudo` without ever being told your password, and without you losing sight of
+what it runs as root.
+
 **Linux only.** It reads `/proc`, talks to zenity or `systemd-ask-password`, and
 logs to the journal. None of that exists elsewhere.
 
@@ -21,6 +25,33 @@ If a script, a CI wrapper, or an agent is driving sudo on your behalf, you are
 typing your password blind.
 
 This helper works the rest out on its own.
+
+## Why you might want it
+
+The case it was built for: giving a program the ability to run `sudo` while
+keeping both the password and the decision on your side.
+
+With `SUDO_ASKPASS` pointed here:
+
+* **The password never reaches the caller.** It travels from the dialog into
+  sudo. The program that ran `sudo -A` gets an exit status and nothing else, so
+  it cannot store the secret, print it, or carry it into a log, a transcript or
+  a bug report.
+* **Every escalation stops at a dialog** naming the command, the target user,
+  the directory, and — over ssh — the machine. Nothing runs as root that you did
+  not have the chance to read first.
+* **Refusal is per command.** Saying no once revokes nothing and breaks nothing;
+  the caller gets a distinct "declined" and carries on.
+* **There is a record afterwards.** Each request lands in the journal with its
+  outcome, so "what did it do as root today" has an answer.
+
+Compare that with the usual alternatives: a `NOPASSWD` line in sudoers, which
+removes the prompt entirely; the password in an environment variable or a config
+file, where the caller now keeps it forever; or simply running the whole thing
+as root. Against those three, a dialog you have to read is a real improvement.
+
+It is, of course, still a dialog you have to read — see
+[What this is not](#what-this-is-not).
 
 ## How it knows
 
