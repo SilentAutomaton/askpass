@@ -1,0 +1,12 @@
+{
+  "name": "askpass-context-mcp",
+  "version": "2.0.0",
+  "description": "MCP server that runs one sudo command on a remote host, asking for the password locally through askpass-context.",
+  "type": "module",
+  "bin": { "askpass-context-mcp": "index.js" },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.2",
+    "zod": "^3.25.76"
+  }
+}

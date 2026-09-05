@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""SUDO_ASKPASS helper that says what the password is being asked for.
+
+sudo hands an askpass helper nothing but a prompt string, so the usual dialog
+can only say "Password:". This one works out the rest:
+
+  * a caller that already knows (the sudo-ssh MCP) passes ASKPASS_CONTEXT,
+  * otherwise the sudo process is found by walking up /proc from this process,
+    and its command line, target user and working directory are read from there.
+
+The password is written to stdout and never to a log, an argument or the
+environment.
+
+Exit codes: 0 password, 1 declined, 2 no way to ask, 5 timed out.
+"""
+
+import html
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+TIMEOUT_S = 300
+COMMAND_LIMIT = 300
+PROC_WALK_LIMIT = 5
+LOG_TAG = "claude-sudo"
+
+EXIT_OK, EXIT_DECLINED, EXIT_NO_PROMPTER, EXIT_TIMEOUT = 0, 1, 2, 5
+
+# sudo options that consume the next argument
+SUDO_VALUE_OPTS = {
+    "-u", "--user", "-g", "--group", "-p", "--prompt", "-C", "--close-from",
+    "-r", "--role", "-t", "--type", "-h", "--host", "-U", "--other-user",
+    "-c", "--login-class", "-D", "--chdir", "-R", "--chroot",
+}
+
+# A hint for the eye, not a security boundary: things that are hard to undo.
+# Anchored to a command position so `grep rm -rf file` is not a match.
+DANGEROUS = re.compile(
+    r"""(?x)
+    (?:^|[;&|]\s*)\s*
+    (?:
+      mkfs(?:\.\w+)?\b
+    | dd\s+[^;&|]*\bof=/dev/
+    | (?:shutdown|reboot|poweroff|halt)\b
+    | iptables\s+(?:-\w+\s+)*-F\b
+    | nft\s+flush\b
+    | wg-quick\s+down\b
+    | (?:pacman|paru|yay)\s+-R
+    | (?:apt|apt-get)\s+(?:remove|purge)\b
+    | chmod\s+(?:-\w+\s+)*777\s+/
+    | userdel\b
+    | systemctl\s+(?:stop|disable|mask)\b
+    )
+    | >\s*/dev/(?:sd|nvme|vd)
+    """
+)
+
+_RM_CALL = re.compile(r"(?:^|[;&|]\s*)\s*rm\s+([^;&|]*)")
+# Recursive deletion inside these trees is ordinary work, not an incident.
+_RM_SAFE_ROOTS = ("/home/", "/tmp/", "/var/tmp/", "/run/user/")
+
+
+def _rm_is_dangerous(command: str) -> bool:
+    """`rm -rf ./build` is a build step. `rm -rf /etc/foo` is an incident."""
+    import shlex
+
+    for match in _RM_CALL.finditer(command):
+        try:
+            words = shlex.split(match.group(1))
+        except ValueError:
+            words = match.group(1).split()
+        flags = "".join(w for w in words if w.startswith("-"))
+        if not (re.search(r"r", flags, re.I) and "f" in flags):
+            continue
+        for target in (w for w in words if not w.startswith("-")):
+            if target == "/" or target.startswith("/*"):
+                return True
+            if target.startswith("/") and not target.startswith(_RM_SAFE_ROOTS):
+                return True
+    return False
+
+
+# ── reading the process tree ────────────────────────────────────────────────
+
+
+def _proc_field(pid: int, name: str) -> str:
+    try:
+        with open(f"/proc/{pid}/{name}", "rb") as handle:
+            return handle.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _parent_of(pid: int) -> int:
+    for line in _proc_field(pid, "status").splitlines():
+        if line.startswith("PPid:"):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return 0
+    return 0
+
+
+def parse_sudo_argv(argv: list[str]) -> tuple[str, str]:
+    """Return (user the command runs as, the command itself)."""
+    run_as = "root"
+    index = 1
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--":
+            index += 1
+            break
+        if not arg.startswith("-"):
+            break
+        if arg in ("-u", "--user", "-U", "--other-user"):
+            if index + 1 < len(argv):
+                run_as = argv[index + 1]
+            index += 2
+            continue
+        if arg.startswith("--user="):
+            run_as = arg.split("=", 1)[1]
+            index += 1
+            continue
+        if arg.startswith("-u") and len(arg) > 2:
+            run_as = arg[2:]
+            index += 1
+            continue
+        if arg in SUDO_VALUE_OPTS or any(arg.startswith(o + "=") for o in SUDO_VALUE_OPTS):
+            index += 2 if arg in SUDO_VALUE_OPTS else 1
+            continue
+        index += 1
+    return run_as, " ".join(argv[index:])
+
+
+def local_context() -> dict:
+    """Find the sudo that spawned this helper and describe what it is about to do."""
+    pid = os.getppid()
+    for _ in range(PROC_WALK_LIMIT):
+        if pid <= 1:
+            break
+        if _proc_field(pid, "comm").strip() == "sudo":
+            argv = [a for a in _proc_field(pid, "cmdline").split("\0") if a]
+            if not argv:
+                break
+            run_as, command = parse_sudo_argv(argv)
+            try:
+                cwd = os.readlink(f"/proc/{pid}/cwd")
+            except OSError:
+                cwd = ""
+            return {"kind": "local", "run_as": run_as, "command": command, "cwd": cwd}
+        pid = _parent_of(pid)
+    return {}
+
+
+def context() -> dict:
+    raw = os.environ.get("ASKPASS_CONTEXT")
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                loaded.setdefault("kind", "ssh")
+                return loaded
+        except (ValueError, TypeError):
+            pass
+    return local_context()
+
+
+# ── what the window says ────────────────────────────────────────────────────
+
+
+def clip(text: str, limit: int = COMMAND_LIMIT) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _strip_sudo(command: str) -> str:
+    """The ssh side hands over `sudo -S -- rm -rf /x`; judge the inner command."""
+    if not command.startswith("sudo "):
+        return command
+    import shlex
+
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    return parse_sudo_argv(words)[1] or command
+
+
+def is_dangerous(command: str) -> bool:
+    if not command:
+        return False
+    command = _strip_sudo(command)
+    return bool(DANGEROUS.search(command)) or _rm_is_dangerous(command)
+
+
+def title(ctx: dict) -> str:
+    if ctx.get("kind") == "ssh":
+        where = ctx.get("server") or ctx.get("host") or "remote host"
+        return f"sudo — {where} (ssh)"
+    return "sudo — this machine"
+
+
+def rows(ctx: dict) -> list[tuple[str, str]]:
+    out = []
+    if ctx.get("kind") == "ssh":
+        where = ctx.get("server") or ctx.get("host") or ""
+        if ctx.get("description"):
+            where = f"{where} · {ctx['description']}" if where else ctx["description"]
+        if where:
+            out.append(("Where", where))
+        login = ctx.get("host", "")
+        if ctx.get("login"):
+            login = f"{ctx['login']}@{login}" if login else ctx["login"]
+        if ctx.get("port") and str(ctx["port"]) != "22":
+            login = f"{login}:{ctx['port']}"
+        if login:
+            out.append(("Host", login))
+    elif ctx.get("cwd"):
+        out.append(("Directory", ctx["cwd"]))
+    out.append(("Run as", ctx.get("run_as") or "root"))
+    if ctx.get("command"):
+        out.append(("Command", clip(ctx["command"])))
+    return out
+
+
+def body(ctx: dict, prompt: str) -> str:
+    lines = []
+    if is_dangerous(ctx.get("command", "")):
+        lines.append("⚠ This command is destructive.")
+        lines.append("")
+    run_as = ctx.get("run_as") or "root"
+    if ctx.get("kind") == "ssh":
+        lines.append(f"Claude Code is asking to run a remote command as {run_as}.")
+    elif ctx:
+        lines.append(f"Claude Code is asking to run a command as {run_as}.")
+    else:
+        lines.append(prompt or "A program is asking for a sudo password.")
+    lines.append("")
+    table = rows(ctx)
+    if table:
+        width = max(len(label) for label, _ in table)
+        lines += [f"  {label.ljust(width)}   {value}" for label, value in table]
+    # zenity parses the form text as Pango markup
+    return html.escape("\n".join(lines))
+
+
+def summary(ctx: dict, prompt: str) -> str:
+    """One line, for the prompters that cannot show a table."""
+    if not ctx:
+        return prompt or "sudo password: "
+    where = ctx.get("server") or ctx.get("host") or "this machine"
+    return f"sudo on {where} as {ctx.get('run_as') or 'root'}: {clip(ctx.get('command', ''), 120)} "
+
+
+# ── asking ──────────────────────────────────────────────────────────────────
+
+
+def ask_zenity(ctx: dict, prompt: str) -> tuple[str | None, int]:
+    danger = is_dangerous(ctx.get("command", ""))
+    result = subprocess.run(
+        [
+            "zenity", "--forms",
+            f"--title={title(ctx)}",
+            f"--text={body(ctx, prompt)}",
+            "--add-password=Password",
+            f"--timeout={TIMEOUT_S}",
+            f"--ok-label={'Run anyway' if danger else 'Authenticate'}",
+            "--cancel-label=Cancel",
+            "--width=560",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return result.stdout.rstrip("\n"), EXIT_OK
+    return None, EXIT_TIMEOUT if result.returncode == 5 else EXIT_DECLINED
+
+
+def ask_systemd(ctx: dict, prompt: str) -> tuple[str | None, int]:
+    result = subprocess.run(
+        ["systemd-ask-password", "--no-tty", summary(ctx, prompt)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return result.stdout.rstrip("\n"), EXIT_OK
+    return None, EXIT_DECLINED
+
+
+def ask_tty(ctx: dict, prompt: str) -> tuple[str | None, int]:
+    import getpass
+
+    try:
+        with open("/dev/tty", "w") as tty:
+            tty.write(summary(ctx, prompt) + "\n")
+        return getpass.getpass("Password: ", stream=open("/dev/tty", "w")), EXIT_OK
+    except OSError:
+        return None, EXIT_NO_PROMPTER
+
+
+def log(ctx: dict, outcome: str) -> None:
+    parts = [f"outcome={outcome}", f"kind={ctx.get('kind', 'unknown')}"]
+    for key in ("server", "host", "login", "run_as", "cwd"):
+        if ctx.get(key):
+            parts.append(f"{key}={ctx[key]}")
+    if ctx.get("command"):
+        parts.append(f"command={ctx['command']}")
+    try:
+        subprocess.run(
+            ["systemd-cat", "-t", LOG_TAG, "-p", "notice"],
+            input=" ".join(parts) + "\n",
+            text=True,
+            check=False,
+        )
+    except OSError:
+        pass
+
+
+def graphical() -> bool:
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def demo() -> int:
+    samples = [
+        {"kind": "local", "run_as": "root", "command": "pacman -Syu",
+         "cwd": "/home/silent/proj/code/mystical"},
+        {"kind": "ssh", "server": "glinet", "description": "GL.iNet router in the hallway",
+         "host": "192.168.8.1", "login": "root", "port": 22, "run_as": "root",
+         "command": "sudo -S -- rm -rf /overlay/upper/etc"},
+    ]
+    for ctx in samples:
+        print(f"--- {title(ctx)} ---")
+        print(html.unescape(body(ctx, "")))
+        print()
+        if graphical() and shutil.which("zenity"):
+            ask_zenity(ctx, "")
+    return EXIT_OK
+
+
+def main(argv: list[str]) -> int:
+    if "--demo" in argv:
+        return demo()
+
+    prompt = argv[1] if len(argv) > 1 else "[sudo] password: "
+    ctx = context()
+
+    if graphical() and shutil.which("zenity"):
+        password, code = ask_zenity(ctx, prompt)
+    elif shutil.which("systemd-ask-password"):
+        password, code = ask_systemd(ctx, prompt)
+    else:
+        password, code = ask_tty(ctx, prompt)
+
+    outcome = {EXIT_OK: "ok", EXIT_DECLINED: "declined",
+               EXIT_TIMEOUT: "timeout", EXIT_NO_PROMPTER: "no-prompter"}[code]
+    log(ctx, outcome)
+
+    if code != EXIT_OK:
+        return code
+    print(password)
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
