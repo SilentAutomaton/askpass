@@ -166,12 +166,16 @@ Servers are read from an env file whose format matches
 be reused as is. `SSH_MANAGER_ENV` may point anywhere; the default is
 `~/.ssh-manager/.env`.
 
-That project is the fuller tool — sessions, tunnels, deployments, database
-work — and it is worth using for all of that. This server deliberately does one
-thing it does differently: it never reads a stored `SSH_SERVER_*_SUDO_PASSWORD`,
-and asks a person instead. See [above](#why-not-just-put-the-password-in-a-config-file)
-for why. The two can share the same file; only the password fields are ignored
-here.
+**This does not replace that project — it sits next to it.** mcp-ssh-manager is
+the general tool: sessions, file transfer, tunnels, deployments, database work,
+monitoring. Keep using it for all of that. This server adds one tool for the
+narrow case where a command needs root and you want to see it before it runs.
+
+Register both, point them at the same file, and split the work by privilege:
+ordinary remote commands through mcp-ssh-manager, anything under `sudo` through
+here. The only field this server ignores is `SSH_SERVER_*_SUDO_PASSWORD` — it
+asks a person instead of reading a stored secret, for the reasons
+[above](#why-not-just-put-the-password-in-a-config-file).
 
 | Key | Meaning |
 |---|---|

@@ -9,12 +9,21 @@ an argument and never an environment variable.
 See the [main README](../README.md) for the dialog, the config snippet and the
 `.env` format.
 
+## It complements mcp-ssh-manager, it does not replace it
+
 Server definitions use the format of
 [bvisible/mcp-ssh-manager](https://github.com/bvisible/mcp-ssh-manager), so an
-existing file works unchanged. The one field this server ignores on purpose is
-`SSH_SERVER_*_SUDO_PASSWORD`: a stored password means every later escalation
-happens without anyone being asked, and it means there is a secret on disk to
-leak. Here the password is requested per command and kept nowhere.
+existing file works unchanged — and that is the intended arrangement: run both.
+
+That project is the general one — sessions, file transfer, tunnels, deployments,
+databases, monitoring — and nothing here duplicates it. This server exists for
+one slice of the work: the commands that need root. Split them by privilege,
+ordinary commands there and `sudo` here, and each tool does what it is good at.
+
+The one field this server ignores on purpose is `SSH_SERVER_*_SUDO_PASSWORD`. A
+stored password means every later escalation happens without anyone being asked,
+and it means there is a secret on disk to leak. Here it is requested per command
+and kept nowhere.
 
 ## Read this before you wire it up
 
