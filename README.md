@@ -65,7 +65,10 @@ ssh-manager style `~/.ssh-manager/.env` (`SSH_SERVER_<NAME>_HOST`, `_USER`,
 
 * The dialog times out after 300 seconds, so a forgotten prompt cannot wedge the
   caller. Cancel, timeout and "nowhere to ask" are distinct exit codes (1, 5, 2)
-  rather than one generic failure.
+  rather than one generic failure. `ASKPASS_TIMEOUT` overrides the 300.
+* The remote side checks that the host answers on its ssh port before the dialog
+  opens, so a machine that is down or a typo in the name costs you an error
+  after ten seconds instead of a password prompt.
 * Every request is logged to the journal under the `claude-sudo` tag: what was
   asked, where, and whether you allowed it. The password is never part of that.
 * Commands that are hard to undo get a banner and an OK button labelled `Run
