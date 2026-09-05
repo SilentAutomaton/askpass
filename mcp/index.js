@@ -6,6 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { spawn } from 'child_process';
+import { createConnection } from 'net';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, join } from 'path';
@@ -69,6 +70,21 @@ function askpass(prompt, context) {
   });
 }
 
+// Ask the network before asking the person: a dead host should not cost a
+// password prompt.
+function reachable(host, port) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host, port, timeout: CONNECT_TIMEOUT * 1000 });
+    const fail = () => {
+      socket.destroy();
+      reject(new Error(`${host}:${port} is not reachable within ${CONNECT_TIMEOUT}s`));
+    };
+    socket.on('connect', () => { socket.destroy(); resolve(); });
+    socket.on('timeout', fail);
+    socket.on('error', fail);
+  });
+}
+
 function sshSudo({ server, description, host, user, port = 22, keyPath, command, sudoUser }) {
   const remote = sudoUser ? `sudo -S -u ${sudoUser} -- ${command}` : `sudo -S -- ${command}`;
   const args = [
@@ -89,22 +105,25 @@ function sshSudo({ server, description, host, user, port = 22, keyPath, command,
     command: remote,
   };
 
-  return askpass(`[sudo] password for ${user}@${host}: `, context).then(
-    password =>
-      new Promise((resolve, reject) => {
-        const proc = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-        let stdout = '', stderr = '';
-        proc.stdout.on('data', d => (stdout += d));
-        proc.stderr.on('data', d => {
-          const s = d.toString();
-          if (!/\[sudo\]|password\s*:/i.test(s)) stderr += s;
-        });
-        proc.stdin.write(password + '\n');
-        proc.stdin.end();
-        proc.on('close', code => resolve({ code, stdout, stderr }));
-        proc.on('error', reject);
-      })
-  );
+  function run(password) {
+    return new Promise((resolve, reject) => {
+      const proc = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      let stdout = '', stderr = '';
+      proc.stdout.on('data', d => (stdout += d));
+      proc.stderr.on('data', d => {
+        const s = d.toString();
+        if (!/\[sudo\]|password\s*:/i.test(s)) stderr += s;
+      });
+      proc.stdin.write(password + '\n');
+      proc.stdin.end();
+      proc.on('close', code => resolve({ code, stdout, stderr }));
+      proc.on('error', reject);
+    });
+  }
+
+  return reachable(host, port)
+    .then(() => askpass(`[sudo] password for ${user}@${host}: `, context))
+    .then(run);
 }
 
 const server = new McpServer({ name: 'sudo-ssh', version: '2.0.0' });

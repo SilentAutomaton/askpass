@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import sys
 
-TIMEOUT_S = 300
+TIMEOUT_S = int(os.environ.get("ASKPASS_TIMEOUT", "300"))
 COMMAND_LIMIT = 300
 PROC_WALK_LIMIT = 5
 LOG_TAG = "claude-sudo"
@@ -135,6 +135,19 @@ def parse_sudo_argv(argv: list[str]) -> tuple[str, str]:
     return run_as, " ".join(argv[index:])
 
 
+def _cwd_of(pid: int) -> str:
+    """sudo is setuid root, so its own /proc/<pid>/cwd is unreadable to us.
+    The shell that called it sits one level up and has the same directory."""
+    for candidate in (pid, _parent_of(pid)):
+        if candidate <= 1:
+            continue
+        try:
+            return os.readlink(f"/proc/{candidate}/cwd")
+        except OSError:
+            continue
+    return ""
+
+
 def local_context() -> dict:
     """Find the sudo that spawned this helper and describe what it is about to do."""
     pid = os.getppid()
@@ -146,11 +159,8 @@ def local_context() -> dict:
             if not argv:
                 break
             run_as, command = parse_sudo_argv(argv)
-            try:
-                cwd = os.readlink(f"/proc/{pid}/cwd")
-            except OSError:
-                cwd = ""
-            return {"kind": "local", "run_as": run_as, "command": command, "cwd": cwd}
+            return {"kind": "local", "run_as": run_as, "command": command,
+                    "cwd": _cwd_of(pid)}
         pid = _parent_of(pid)
     return {}
 
