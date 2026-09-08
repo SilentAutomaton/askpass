@@ -1,6 +1,6 @@
 {
   "name": "askpass-sudo-ssh",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server that runs one sudo command on a remote host, asking for the password locally through askpass.",
   "type": "module",
   "bin": {

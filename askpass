@@ -23,6 +23,7 @@ import subprocess
 import sys
 import textwrap
 
+VERSION = "1.1"
 TIMEOUT_S = int(os.environ.get("ASKPASS_TIMEOUT", "300"))
 COMMAND_LIMIT = 300
 WRAP_WIDTH = 72
@@ -385,6 +386,9 @@ def demo() -> int:
 
 
 def main(argv: list[str]) -> int:
+    if "--version" in argv:
+        print(f"askpass {VERSION}")
+        return EXIT_OK
     if "--demo" in argv:
         return demo()
 
