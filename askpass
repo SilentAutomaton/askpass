@@ -21,9 +21,11 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 
 TIMEOUT_S = int(os.environ.get("ASKPASS_TIMEOUT", "300"))
 COMMAND_LIMIT = 300
+WRAP_WIDTH = 72
 PROC_WALK_LIMIT = 5
 LOG_TAG = "askpass"
 
@@ -279,7 +281,12 @@ def body(ctx: dict, prompt: str) -> str:
     table = rows(ctx)
     if table:
         width = max(len(label) for label, _ in table)
-        lines += [f"  {label.ljust(width)}   {value}" for label, value in table]
+        indent = " " * (width + 5)
+        for label, value in table:
+            parts = textwrap.wrap(value, WRAP_WIDTH - width, break_long_words=True,
+                                  break_on_hyphens=False) or [""]
+            lines.append(f"  {label.ljust(width)}   {parts[0]}")
+            lines += [indent + part for part in parts[1:]]
     # zenity parses the form text as Pango markup
     return html.escape("\n".join(lines))
 
@@ -299,10 +306,9 @@ def ask_zenity(ctx: dict, prompt: str) -> tuple[str | None, int]:
     danger = is_dangerous(ctx.get("command", ""))
     result = subprocess.run(
         [
-            "zenity", "--forms",
+            "zenity", "--entry", "--hide-text",
             f"--title={title(ctx)}",
             f"--text={body(ctx, prompt)}",
-            "--add-password=Password",
             f"--timeout={TIMEOUT_S}",
             f"--ok-label={'Run anyway' if danger else 'Authenticate'}",
             "--cancel-label=Cancel",

@@ -84,6 +84,17 @@ def test_clip():
     assert ac.clip("a  b\n c") == "a b c"
 
 
+def test_long_command_wraps():
+    ctx = {"kind": "local", "run_as": "root", "cwd": "/srv",
+           "command": "systemctl restart " + "very-long-unit-name" * 20}
+    text = ac.body(ctx, "")
+    body_lines = [line for line in text.splitlines() if line.startswith("  ")]
+    assert len(body_lines) > 3, "long command stayed on one line"
+    assert all(len(line) <= 80 for line in body_lines), "a line is too wide"
+    continued = [line for line in body_lines if line.startswith(" " * 14)]
+    assert continued, "continuation lines are not indented to the value column"
+
+
 def test_context_env_wins():
     payload = {"kind": "ssh", "server": "vps", "host": "203.0.113.5",
                "login": "deploy", "run_as": "root", "command": "id"}
